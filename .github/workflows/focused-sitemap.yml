@@ -1,0 +1,55 @@
+name: Sitemap fix verification
+on:
+  push:
+    branches: [verify/unique-sitemap-limit]
+permissions:
+  contents: read
+jobs:
+  test:
+    if: github.repository == 'hiyouwhatsapp/Cloudflare-Cache-Preloader'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 7162a9203b3a3a13222e6b846b76213ee7aca6cb
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact fix commit
+        run: test "$(git rev-parse HEAD)" = "7162a9203b3a3a13222e6b846b76213ee7aca6cb"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked --extra dev
+      - name: Reproduce all five regressions on original code
+        run: |
+          git show ae533aba9e5bc18fa07bbf07c88736b5ea30579e:src/preloader/sitemap.py > src/preloader/sitemap.py
+          set +e
+          uv run pytest -q tests/test_sitemap.py -k "max_urls_counts_unique_pages or repeated_pages" --junitxml=baseline.xml
+          baseline_status=$?
+          set -e
+          test "$baseline_status" = 1
+          uv run python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("baseline.xml").getroot().find("testsuite")
+          assert suite is not None
+          assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("5", "5", "0", "0"), suite.attrib
+          PY
+          git restore --source=7162a9203b3a3a13222e6b846b76213ee7aca6cb -- src/preloader/sitemap.py
+      - name: Full offline test suite
+        run: uv run pytest -q -m "not live" --junitxml=results.xml
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - name: Confirm source unchanged
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sitemap-python-${{ matrix.python-version }}
+          path: |
+            baseline.xml
+            results.xml
